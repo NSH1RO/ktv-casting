@@ -4,6 +4,52 @@ use std::net::IpAddr;
 use super::{Capabilities, CastError, Caster, Progress, Quality, SongRef};
 use crate::dlna_controller::{DlnaController, DlnaDevice};
 
+/// How the renderer obtains media. Existing callers keep using the proxy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MediaUrlMode {
+    Direct,
+    #[default]
+    Proxy,
+}
+
+impl std::str::FromStr for MediaUrlMode {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "direct" => Ok(Self::Direct),
+            "" | "2" | "proxy" => Ok(Self::Proxy),
+            _ => Err("请选择 1（原链接）或 2（反向代理）"),
+        }
+    }
+}
+
+fn transport_url(mode: MediaUrlMode, media: &str, ip: IpAddr, port: u16) -> String {
+    match mode {
+        MediaUrlMode::Direct => media.to_owned(),
+        MediaUrlMode::Proxy => format!("http://{}/{}", std::net::SocketAddr::new(ip, port), media),
+    }
+}
+
+async fn direct_media_url(song: &str) -> Result<String, CastError> {
+    if song.starts_with("http://") || song.starts_with("https://") {
+        return Ok(song.to_owned());
+    }
+    // The playlist normalizes bilibili://video/BV...?page=0 to BV...-page0.
+    // Resolve the identifier to a single MP4 URL; the renderer downloads it.
+    let path = song.split('?').next().unwrap_or(song);
+    let (bvid, page) = match path.split_once("-page") {
+        Some((bvid, page)) => (bvid, page.parse::<u32>()
+            .map_err(|_| CastError::Device("无效的 Bilibili 分P编号".into()))?),
+        None => (path, 0),
+    };
+    match crate::bilibili_parser::get_bilibili_media(bvid, Some(page), Quality::P720.as_qn())
+        .await.map_err(|error| CastError::Device(format!("解析原链接失败：{error}")))? {
+        crate::bilibili_parser::BilibiliMedia::Direct { url } => Ok(url),
+        _ => Err(CastError::Device("双轨媒体需要本地混流，请选择反向代理".into())),
+    }
+}
+
 pub struct DlnaCaster {
     controller: DlnaController,
     device: DlnaDevice,
@@ -15,6 +61,7 @@ pub struct DlnaCaster {
     transport: tokio::sync::Mutex<()>,
     seek_sequence: std::sync::atomic::AtomicU64,
     loaded_generation: std::sync::atomic::AtomicU64,
+    media_url_mode: MediaUrlMode,
 }
 
 impl DlnaCaster {
@@ -38,6 +85,7 @@ impl DlnaCaster {
             transport: tokio::sync::Mutex::new(()),
             seek_sequence: std::sync::atomic::AtomicU64::new(0),
             loaded_generation: std::sync::atomic::AtomicU64::new(0),
+            media_url_mode: MediaUrlMode::Proxy,
         }
     }
 
@@ -49,6 +97,11 @@ impl DlnaCaster {
         self
     }
 
+    pub fn with_media_url_mode(mut self, mode: MediaUrlMode) -> Self {
+        self.media_url_mode = mode;
+        self
+    }
+
     async fn reload_song_at(
         &self,
         song: &str,
@@ -56,11 +109,12 @@ impl DlnaCaster {
         reason: &str,
     ) -> Result<(), CastError> {
         let quality = crate::get_dlna_quality();
-        let session = self
-            .sessions
-            .as_ref()
+        let session = self.sessions.as_ref()
+            .filter(|_| self.media_url_mode == MediaUrlMode::Proxy)
             .map(|sessions| sessions.activate(song, quality));
-        let media_url = if let Some(session) = &session {
+        let media_url = if self.media_url_mode == MediaUrlMode::Direct {
+            direct_media_url(song).await?
+        } else if let Some(session) = &session {
             session
                 .prepare(&self.media_client)
                 .await
@@ -80,12 +134,10 @@ impl DlnaCaster {
             return Err(CastError::Device("播放请求已过期".into()));
         }
         self.controller
-            .set_avtransport_uri(
+            .set_avtransport_url(
                 &self.device,
-                &media_url,
+                &transport_url(self.media_url_mode, &media_url, self.server_ip, self.server_port),
                 "",
-                self.server_ip,
-                self.server_port,
             )
             .await
             .map_err(|error| self.failure("设置媒体地址", error))?;
@@ -99,7 +151,7 @@ impl DlnaCaster {
                 .store(session.generation, std::sync::atomic::Ordering::Relaxed);
         }
 
-        if (session.is_some() || quality == Quality::P720) && position > 0 {
+        if (self.media_url_mode == MediaUrlMode::Direct || session.is_some() || quality == Quality::P720) && position > 0 {
             if let Err(error) = self.controller.seek(&self.device, position).await {
                 log::warn!(target: "DLNA1080", "切换媒体后恢复进度失败: quality={}, position={}s, error={}", quality.label(), position, error);
                 return Err(self.failure("恢复播放进度", error));
@@ -177,7 +229,7 @@ impl Caster for DlnaCaster {
     }
 
     async fn seek(&self, secs: u32) -> Result<(), CastError> {
-        if self.sessions.is_none() && crate::get_dlna_quality() == Quality::P1080 {
+        if self.media_url_mode == MediaUrlMode::Proxy && self.sessions.is_none() && crate::get_dlna_quality() == Quality::P1080 {
             let song = self
                 .current_song
                 .lock()
@@ -200,7 +252,7 @@ impl Caster for DlnaCaster {
             return Ok(());
         }
         let mut old_streams = None;
-        if let Some(sessions) = &self.sessions {
+        if let Some(sessions) = self.sessions.as_ref().filter(|_| self.media_url_mode == MediaUrlMode::Proxy) {
             if let Some(session) = sessions
                 .get(
                     self.loaded_generation
@@ -254,6 +306,9 @@ impl Caster for DlnaCaster {
     }
 
     async fn set_quality(&self, quality: Quality) -> Result<(), CastError> {
+        if self.media_url_mode == MediaUrlMode::Direct && quality != Quality::P720 {
+            return Err(CastError::Device("原链接模式不支持本地清晰度切换，请选择反向代理".into()));
+        }
         let previous = crate::get_dlna_quality();
         if previous == quality {
             return Ok(());
@@ -301,7 +356,95 @@ impl Caster for DlnaCaster {
 
 #[cfg(test)]
 mod tests {
-    use super::with_start_offset;
+    use super::{with_start_offset, transport_url, direct_media_url, MediaUrlMode};
+
+    #[tokio::test]
+    async fn direct_cast_sends_original_url_and_uses_native_seek_with_sessions_attached() {
+        use super::{Caster, DlnaCaster, DlnaController, DlnaDevice, SongRef};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let location = format!("http://{}/description.xml", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut bodies = Vec::new();
+            for _ in 0..5 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let mut buffer = [0; 4096];
+                let header_end = loop {
+                    let size = stream.read(&mut buffer).await.unwrap();
+                    assert!(size > 0);
+                    bytes.extend_from_slice(&buffer[..size]);
+                    if let Some(index) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                        break index + 4;
+                    }
+                };
+                let headers = String::from_utf8_lossy(&bytes[..header_end]).to_string();
+                let length = headers.lines().find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().unwrap())
+                }).unwrap_or(0);
+                while bytes.len() < header_end + length {
+                    let size = stream.read(&mut buffer).await.unwrap();
+                    assert!(size > 0);
+                    bytes.extend_from_slice(&buffer[..size]);
+                }
+                let body = if headers.starts_with("GET ") {
+                    r#"<root><device><deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>
+<friendlyName>URL mode renderer</friendlyName><serviceList><service>
+<serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>
+<serviceId>urn:upnp-org:serviceId:AVTransport</serviceId>
+<SCPDURL>/service.xml</SCPDURL><controlURL>/control</controlURL>
+<eventSubURL>/events</eventSubURL></service></serviceList></device></root>"#
+                } else {
+                    bodies.push(String::from_utf8(bytes[header_end..header_end + length].to_vec()).unwrap());
+                    r#"<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body/></s:Envelope>"#
+                };
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+            bodies
+        });
+        let device = rupnp::Device::from_url(location.parse().unwrap()).await.unwrap();
+        let sessions = std::sync::Arc::new(crate::media_session::MediaSessions::default());
+        let caster = DlnaCaster::new(DlnaController::new(), DlnaDevice {
+            friendly_name: "URL mode renderer".into(), location, device, services: vec![],
+        }, "127.0.0.1".parse().unwrap(), 0)
+            .with_sessions(sessions)
+            .with_media_url_mode(MediaUrlMode::Direct);
+        let song = "https://cdn.example/video.mp4?Policy=a%2Fb&Signature=x=y#media";
+        caster.play_song(&SongRef(song.into())).await.unwrap();
+        caster.seek(42).await.unwrap();
+        let bodies = tokio::time::timeout(std::time::Duration::from_secs(5), server).await.unwrap().unwrap();
+        let set_uri = bodies.iter().find(|body| body.contains("<CurrentURI>")).unwrap();
+        let xml = roxmltree::Document::parse(set_uri).unwrap();
+        assert_eq!(xml.descendants().find(|node| node.has_tag_name("CurrentURI")).unwrap().text(), Some(song));
+        assert!(bodies.last().unwrap().contains("<Target>00:00:42</Target>"));
+        assert!(caster.set_quality(super::Quality::P1080).await.is_err());
+    }
+
+    #[test]
+    fn parses_manual_mode_and_rejects_invalid_choice() {
+        assert_eq!("1".parse(), Ok(MediaUrlMode::Direct));
+        assert_eq!("direct".parse(), Ok(MediaUrlMode::Direct));
+        assert_eq!("2".parse(), Ok(MediaUrlMode::Proxy));
+        assert_eq!("".parse(), Ok(MediaUrlMode::Proxy));
+        assert!("3".parse::<MediaUrlMode>().is_err());
+    }
+
+    #[tokio::test]
+    async fn direct_urls_keep_signed_query_and_fragment_without_network() {
+        let song = "https://cdn.example/video.m3u8?Policy=a%2Fb&Signature=x=y#media";
+        let resolved = direct_media_url(song).await.unwrap();
+        assert_eq!(transport_url(MediaUrlMode::Direct, &resolved, "127.0.0.1".parse().unwrap(), 8080), song);
+    }
+
+    #[test]
+    fn proxy_urls_keep_absolute_sources_and_session_paths_inside_proxy() {
+        let ip = "192.168.1.2".parse().unwrap();
+        assert_eq!(transport_url(MediaUrlMode::Proxy, "https://cdn.example/v.mp4?x=1&y=2", ip, 8080), "http://192.168.1.2:8080/https://cdn.example/v.mp4?x=1&y=2");
+        assert_eq!(transport_url(MediaUrlMode::Proxy, "__ktv_media/3.mp4", "::1".parse().unwrap(), 8080), "http://[::1]:8080/__ktv_media/3.mp4");
+    }
 
     #[test]
     fn replaces_an_existing_start_offset() {

@@ -6,7 +6,8 @@ mod cli {
     use indicatif::{ProgressBar, ProgressDrawTarget, ProgressState, ProgressStyle};
     use ktv_casting_lib::cast::bilibili_caster::{self as bili, BilibiliSession};
     use ktv_casting_lib::dlna_controller::{DlnaController, DlnaDevice};
-    use ktv_casting_lib::{ENGINE_STATE, cycle_quality_core, start_bilibili_engine_core, start_engine_core, toggle_danmaku_core, toggle_pause_core, trigger_next_song, trigger_prev_song, volume_down_core, volume_up_core};
+    use ktv_casting_lib::cast::dlna_caster::MediaUrlMode;
+    use ktv_casting_lib::{ENGINE_STATE, cycle_quality_core, start_bilibili_engine_core, start_engine_core_with_media_url_mode, toggle_danmaku_core, toggle_pause_core, trigger_next_song, trigger_prev_song, volume_down_core, volume_up_core};
     use log::{Log, Metadata, Record, info, warn};
     use std::fmt::Write;
     use std::io;
@@ -60,10 +61,11 @@ mod cli {
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
         } else {
             // --- DLNA 模式 ---
+            let media_url_mode = select_media_url_mode_interactively()?;
             let controller = DlnaController::new();
             let device = select_dlna_device_interactively(&controller).await?;
             let engine_rt = tokio::runtime::Runtime::new().context("Failed to create engine runtime")?;
-            start_engine_core(base_url, room_id, device.location.clone(), engine_rt)
+            start_engine_core_with_media_url_mode(base_url, room_id, device.location.clone(), engine_rt, media_url_mode)
                 .await
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
         }
@@ -90,6 +92,24 @@ mod cli {
         .await?;
 
         Ok(())
+    }
+
+    fn select_media_url_mode_interactively() -> Result<MediaUrlMode> {
+        println!("DLNA 媒体传输方式：");
+        println!("  1. 传原链接（设备直接访问源站；需支持源站协议、鉴权和媒体格式）");
+        println!("  2. 反向代理（由本机转发媒体，支持本地混流；默认）");
+        loop {
+            print!("请选择 [1/2，默认2]：");
+            io::Write::flush(&mut io::stdout())?;
+            let mut input = String::new();
+            if io::stdin().read_line(&mut input)? == 0 {
+                bail!("未读取到媒体传输方式，输入已关闭");
+            }
+            match input.parse() {
+                Ok(mode) => return Ok(mode),
+                Err(message) => println!("{message}"),
+            }
+        }
     }
 
     async fn acquire_bilibili_session() -> Result<BilibiliSession> {

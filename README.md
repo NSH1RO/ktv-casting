@@ -37,7 +37,16 @@ cargo run --release
 
 1. 输入房间链接（例如 `https://ktv.example.com/102`）
 2. 选择投屏模式（1: DLNA / 2: Bilibili）
-3. 选择设备
+3. DLNA 模式选择媒体传输方式：`1` 传原链接 / `2` 反向代理（默认）
+4. 选择设备
+
+原链接模式将 HTTP/HTTPS 链接（包含完整查询参数）直接发送给设备，媒体不经本机转发。Bilibili BV/分P标识会先解析为 720P 单文件媒体直链，再交给设备下载。设备需要能访问源站并支持其 TLS、媒体格式及鉴权要求；需要 Referer/Cookie 的源站可能无法直连。YouTube 等网页链接保持原样，普通 DLNA 设备通常不能播放，请使用反向代理。原链接模式不支持本地 1080P 双轨混流和清晰度切换，定位使用设备原生 Seek。
+
+反向代理模式保留现有 Range、缓存和混流功能；设备需要能访问本机媒体端口。Bilibili 小电视云投屏不使用此选项。
+
+Rust 调用方可以使用 `start_engine_core_with_media_url_mode(..., MediaUrlMode::Direct)` 显式选择；原有 `start_engine_core` 接口仍默认使用反向代理。Android App 的界面位于独立的配套仓库，本仓库中的 CLI 已提供选择菜单。
+
+Android 新增 JNI 方法 `startEngineWithMediaUrlMode(baseUrl, roomId, targetLocation, direct: Boolean)`，`true` 为原链接，`false` 为反向代理；原有 `startEngine` 保持默认代理。配套 App 需要声明此 native 方法并将界面选择传入，才能在手机界面使用该功能。
 
 #### 房间链接格式
 

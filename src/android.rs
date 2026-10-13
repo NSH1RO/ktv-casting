@@ -198,11 +198,41 @@ pub extern "C" fn Java_zju_bangdream_ktv_casting_RustEngine_searchDevices(
 #[allow(non_snake_case)]
 #[unsafe(no_mangle)]
 pub extern "C" fn Java_zju_bangdream_ktv_casting_RustEngine_startEngine(
-    mut env: JNIEnv,
+    env: JNIEnv,
     _class: JClass,
     base_url: JString,
     room_id: JString,
     target_location: JString,
+) {
+    start_dlna_engine(env, base_url, room_id, target_location,
+        crate::cast::dlna_caster::MediaUrlMode::Proxy);
+}
+
+/// Additive JNI entry point: true sends the original URL; false uses the proxy.
+#[allow(non_snake_case)]
+#[unsafe(no_mangle)]
+pub extern "C" fn Java_zju_bangdream_ktv_casting_RustEngine_startEngineWithMediaUrlMode(
+    env: JNIEnv,
+    _class: JClass,
+    base_url: JString,
+    room_id: JString,
+    target_location: JString,
+    direct: jboolean,
+) {
+    let mode = if direct != 0 {
+        crate::cast::dlna_caster::MediaUrlMode::Direct
+    } else {
+        crate::cast::dlna_caster::MediaUrlMode::Proxy
+    };
+    start_dlna_engine(env, base_url, room_id, target_location, mode);
+}
+
+fn start_dlna_engine(
+    mut env: JNIEnv,
+    base_url: JString,
+    room_id: JString,
+    target_location: JString,
+    mode: crate::cast::dlna_caster::MediaUrlMode,
 ) {
     let base_url_str: String = env.get_string(&base_url).unwrap().into();
     let loc_str: String = env.get_string(&target_location).unwrap().into();
@@ -220,7 +250,7 @@ pub extern "C" fn Java_zju_bangdream_ktv_casting_RustEngine_startEngine(
         let handle = rt.handle().clone();
         handle.block_on(async {
             // 使用 match 代替 expect，防止 panic 污染全局锁
-            if let Err(e) = crate::start_engine_core(base_url_str, room_id_str, loc_str, rt).await {
+            if let Err(e) = crate::start_engine_core_with_media_url_mode(base_url_str, room_id_str, loc_str, rt, mode).await {
                 log::error!("Failed to start engine: {}", e);
             }
         });

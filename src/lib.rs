@@ -265,6 +265,18 @@ pub async fn start_engine_core(
     loc_str: String,
     rt: tokio::runtime::Runtime,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    start_engine_core_with_media_url_mode(base_url_str, room_id, loc_str, rt,
+        cast::dlna_caster::MediaUrlMode::Proxy).await
+}
+
+/// Start a DLNA session with an explicit media delivery choice.
+pub async fn start_engine_core_with_media_url_mode(
+    base_url_str: String,
+    room_id: String,
+    loc_str: String,
+    rt: tokio::runtime::Runtime,
+    media_url_mode: cast::dlna_caster::MediaUrlMode,
+) -> Result<(), Box<dyn std::error::Error>> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     info!("开始初始化核心引擎: {}, Room: {}", loc_str, room_id);
 
@@ -282,10 +294,11 @@ pub async fn start_engine_core(
 
     let handle = rt.handle().clone();
     let (controller, device, local_ip_addr, port, cache, shared_state) =
-        connect_dlna_device(loc_str, handle).await?;
+        connect_dlna_device_with_media_url_mode(loc_str, handle, media_url_mode).await?;
 
     let caster: Arc<dyn cast::Caster> =
         Arc::new(DlnaCaster::new(controller, device, local_ip_addr, port)
+            .with_media_url_mode(media_url_mode)
             .with_sessions(shared_state.media_sessions.clone()));
 
     connect_room(base_url_str, room_id, caster, local_ip_addr, port, cache, rt).await?;
@@ -297,6 +310,18 @@ pub async fn start_engine_core(
 pub async fn connect_dlna_device(
     loc_str: String,
     handle: tokio::runtime::Handle,
+) -> Result<
+    (DlnaController, DlnaDevice, std::net::IpAddr, u16,
+        Arc<Mutex<std::collections::HashMap<String, u32>>>, web::Data<SharedState>),
+    Box<dyn std::error::Error>,
+> {
+    connect_dlna_device_with_media_url_mode(loc_str, handle, cast::dlna_caster::MediaUrlMode::Proxy).await
+}
+
+async fn connect_dlna_device_with_media_url_mode(
+    loc_str: String,
+    handle: tokio::runtime::Handle,
+    media_url_mode: cast::dlna_caster::MediaUrlMode,
 ) -> Result<
     (
         DlnaController,
@@ -339,6 +364,12 @@ pub async fn connect_dlna_device(
         if let Some(notify) = guard.take() {
             notify.notify_one();
         }
+    }
+
+    let local_ip_addr: std::net::IpAddr = get_best_local_ip(target_ip).parse().unwrap();
+    if media_url_mode == cast::dlna_caster::MediaUrlMode::Direct {
+        info!("DLNA 使用原链接模式，不启动本地媒体代理");
+        return Ok((controller, device, local_ip_addr, 0, cache, shared_state));
     }
 
     // 优先使用已验证的 8080，被占用时回退到内核分配
