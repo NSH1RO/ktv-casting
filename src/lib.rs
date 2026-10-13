@@ -366,8 +366,8 @@ async fn connect_dlna_device_with_media_url_mode(
         }
     }
 
-    let local_ip_addr: std::net::IpAddr = get_best_local_ip(target_ip).parse().unwrap();
     if media_url_mode == cast::dlna_caster::MediaUrlMode::Direct {
+        let local_ip_addr: std::net::IpAddr = get_best_local_ip(target_ip).parse().unwrap();
         info!("DLNA 使用原链接模式，不启动本地媒体代理");
         return Ok((controller, device, local_ip_addr, 0, cache, shared_state));
     }

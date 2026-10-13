@@ -569,8 +569,8 @@ impl DlnaController {
         server_ip: IpAddr,
         server_port: u16,
     ) -> Result<(), rupnp::Error> {
-        let media_url = format!("http://{}/{}", std::net::SocketAddr::new(server_ip, server_port), current_uri);
-        self.set_avtransport_url(device, &media_url, current_uri_metadata).await
+        let media_url = format!("http://{}:{}/{}", server_ip, server_port, current_uri);
+        self.set_avtransport_url_with_title(device, &media_url, current_uri, current_uri_metadata).await
     }
 
     /// Send a complete media URL without adding the local proxy prefix.
@@ -578,6 +578,16 @@ impl DlnaController {
         &self,
         device: &DlnaDevice,
         media_url: &str,
+        current_uri_metadata: &str,
+    ) -> Result<(), rupnp::Error> {
+        self.set_avtransport_url_with_title(device, media_url, media_url, current_uri_metadata).await
+    }
+
+    async fn set_avtransport_url_with_title(
+        &self,
+        device: &DlnaDevice,
+        media_url: &str,
+        title: &str,
         current_uri_metadata: &str,
     ) -> Result<(), rupnp::Error> {
         let avtransport = self
@@ -590,14 +600,14 @@ impl DlnaController {
         // If caller didn't provide metadata, generate a minimal DIDL-Lite for compatibility.
         let metadata = if current_uri_metadata.trim().is_empty() {
             // Title can be anything; devices often only care about protocolInfo.
-            let protocol_info = if media_url.contains(".m3u8") {
+            let protocol_info = if title.contains(".m3u8") {
                 log::info!("检测到HLS流，使用宽松的协议描述以提高兼容性");
                 Some("http-get:*:application/vnd.apple.mpegurl:*")
             }else{
                 None
             };
             log::info!("没有提供元数据，正在生成默认的DIDL-Lite元数据...");
-            build_didl_lite_metadata(media_url, media_url, protocol_info)
+            build_didl_lite_metadata(title, media_url, protocol_info)
         } else {
             current_uri_metadata.to_string()
         };

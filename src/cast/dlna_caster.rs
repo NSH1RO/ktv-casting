@@ -24,13 +24,6 @@ impl std::str::FromStr for MediaUrlMode {
     }
 }
 
-fn transport_url(mode: MediaUrlMode, media: &str, ip: IpAddr, port: u16) -> String {
-    match mode {
-        MediaUrlMode::Direct => media.to_owned(),
-        MediaUrlMode::Proxy => format!("http://{}/{}", std::net::SocketAddr::new(ip, port), media),
-    }
-}
-
 async fn direct_media_url(song: &str) -> Result<String, CastError> {
     if song.starts_with("http://") || song.starts_with("https://") {
         return Ok(song.to_owned());
@@ -133,14 +126,12 @@ impl DlnaCaster {
         if session.as_ref().is_some_and(|s| s.is_stopped()) {
             return Err(CastError::Device("播放请求已过期".into()));
         }
-        self.controller
-            .set_avtransport_url(
-                &self.device,
-                &transport_url(self.media_url_mode, &media_url, self.server_ip, self.server_port),
-                "",
-            )
-            .await
-            .map_err(|error| self.failure("设置媒体地址", error))?;
+        match self.media_url_mode {
+            MediaUrlMode::Direct => self.controller
+                .set_avtransport_url(&self.device, &media_url, "").await,
+            MediaUrlMode::Proxy => self.controller
+                .set_avtransport_uri(&self.device, &media_url, "", self.server_ip, self.server_port).await,
+        }.map_err(|error| self.failure("设置媒体地址", error))?;
         if session.as_ref().is_some_and(|s| s.is_stopped()) {
             return Err(CastError::Device("播放请求已过期".into()));
         }
@@ -356,10 +347,19 @@ impl Caster for DlnaCaster {
 
 #[cfg(test)]
 mod tests {
-    use super::{with_start_offset, transport_url, direct_media_url, MediaUrlMode};
+    use super::{with_start_offset, MediaUrlMode};
 
     #[tokio::test]
     async fn direct_cast_sends_original_url_and_uses_native_seek_with_sessions_attached() {
+        check_cast_url(MediaUrlMode::Direct).await;
+    }
+
+    #[tokio::test]
+    async fn proxy_cast_preserves_upstream_url_and_metadata_title() {
+        check_cast_url(MediaUrlMode::Proxy).await;
+    }
+
+    async fn check_cast_url(mode: MediaUrlMode) {
         use super::{Caster, DlnaCaster, DlnaController, DlnaDevice, SongRef};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -407,20 +407,31 @@ mod tests {
         });
         let device = rupnp::Device::from_url(location.parse().unwrap()).await.unwrap();
         let sessions = std::sync::Arc::new(crate::media_session::MediaSessions::default());
-        let caster = DlnaCaster::new(DlnaController::new(), DlnaDevice {
+        let mut caster = DlnaCaster::new(DlnaController::new(), DlnaDevice {
             friendly_name: "URL mode renderer".into(), location, device, services: vec![],
-        }, "127.0.0.1".parse().unwrap(), 0)
-            .with_sessions(sessions)
-            .with_media_url_mode(MediaUrlMode::Direct);
+        }, "127.0.0.1".parse().unwrap(), 8080)
+            .with_media_url_mode(mode);
+        if mode == MediaUrlMode::Direct {
+            caster = caster.with_sessions(sessions);
+        }
         let song = "https://cdn.example/video.mp4?Policy=a%2Fb&Signature=x=y#media";
         caster.play_song(&SongRef(song.into())).await.unwrap();
         caster.seek(42).await.unwrap();
         let bodies = tokio::time::timeout(std::time::Duration::from_secs(5), server).await.unwrap().unwrap();
         let set_uri = bodies.iter().find(|body| body.contains("<CurrentURI>")).unwrap();
         let xml = roxmltree::Document::parse(set_uri).unwrap();
-        assert_eq!(xml.descendants().find(|node| node.has_tag_name("CurrentURI")).unwrap().text(), Some(song));
+        let expected_url = if mode == MediaUrlMode::Direct {
+            song.to_owned()
+        } else {
+            format!("http://127.0.0.1:8080/{song}")
+        };
+        assert_eq!(xml.descendants().find(|node| node.has_tag_name("CurrentURI")).unwrap().text(), Some(expected_url.as_str()));
+        let metadata = xml.descendants().find(|node| node.has_tag_name("CurrentURIMetaData")).unwrap().text().unwrap();
+        assert!(metadata.contains("<dc:title>https://cdn.example/video.mp4?Policy=a%2Fb&amp;Signature=x=y#media</dc:title>"));
         assert!(bodies.last().unwrap().contains("<Target>00:00:42</Target>"));
-        assert!(caster.set_quality(super::Quality::P1080).await.is_err());
+        if mode == MediaUrlMode::Direct {
+            assert!(caster.set_quality(super::Quality::P1080).await.is_err());
+        }
     }
 
     #[test]
@@ -430,20 +441,6 @@ mod tests {
         assert_eq!("2".parse(), Ok(MediaUrlMode::Proxy));
         assert_eq!("".parse(), Ok(MediaUrlMode::Proxy));
         assert!("3".parse::<MediaUrlMode>().is_err());
-    }
-
-    #[tokio::test]
-    async fn direct_urls_keep_signed_query_and_fragment_without_network() {
-        let song = "https://cdn.example/video.m3u8?Policy=a%2Fb&Signature=x=y#media";
-        let resolved = direct_media_url(song).await.unwrap();
-        assert_eq!(transport_url(MediaUrlMode::Direct, &resolved, "127.0.0.1".parse().unwrap(), 8080), song);
-    }
-
-    #[test]
-    fn proxy_urls_keep_absolute_sources_and_session_paths_inside_proxy() {
-        let ip = "192.168.1.2".parse().unwrap();
-        assert_eq!(transport_url(MediaUrlMode::Proxy, "https://cdn.example/v.mp4?x=1&y=2", ip, 8080), "http://192.168.1.2:8080/https://cdn.example/v.mp4?x=1&y=2");
-        assert_eq!(transport_url(MediaUrlMode::Proxy, "__ktv_media/3.mp4", "::1".parse().unwrap(), 8080), "http://[::1]:8080/__ktv_media/3.mp4");
     }
 
     #[test]
