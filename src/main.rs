@@ -80,6 +80,11 @@ mod cli {
                 for service in device.device.services() {
                     println!("  {} ({})", service.service_type(), service.service_id());
                 }
+                println!("开始只读 SOAP 诊断：查询实际能力、连续进度、音量和静音；不会修改设备状态。");
+                let diagnostics = ktv_casting_lib::dlna_diagnostics::save_read_only_diagnostics(
+                    &device.location, &saved,
+                ).await?;
+                println!("原始请求、响应、错误码及诊断摘要已保存到：{}", diagnostics.display());
                 println!("只读调试完成；未启动投屏引擎或发送任何控制操作。");
                 return Ok(());
             }

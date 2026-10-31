@@ -20,6 +20,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked --lib dlna_diagnostics
       - run: cargo build --release --locked --bin ktv-cli
       - name: Verify CLI starts
         shell: pwsh

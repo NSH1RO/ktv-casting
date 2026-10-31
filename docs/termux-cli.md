@@ -25,6 +25,17 @@ select **1. DLNA**, then **2. Device read-only diagnostics**. This saves
 is needed for this diagnostics path. Media cache files are also stored under
 the current directory (`ktv-media-cache/`).
 
+The diagnostics mode also runs read-only SOAP queries and writes a timestamped
+`soap-*/` subdirectory containing request/response XML, HTTP status and SOAP
+faults in `results.json`, and `summary.txt`. It samples transport state and
+position five times, two seconds apart, and queries protocol/media capabilities,
+volume, mute, loudness, dB range and presets. ConnectionManager results are used
+to discover additional AVTransport/RenderingControl instance IDs (bounded to
+three connections). Audio probes include Master and advertised LF/RF channels.
+Unsupported/missing fields remain distinguishable from a real zero value.
+These queries never issue Play, Pause, Seek, SetVolume or SetMute. To investigate
+progress, start playback using your usual controller before entering diagnostics.
+
 To cross-compile with Rust, an Android NDK and cargo-ndk installed:
 
 ```sh
