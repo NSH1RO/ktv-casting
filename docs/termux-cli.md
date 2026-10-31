@@ -29,7 +29,7 @@ To cross-compile with Rust, an Android NDK and cargo-ndk installed:
 
 ```sh
 rustup target add aarch64-linux-android
-cargo ndk -t arm64-v8a -p 24 build --release --locked --bin ktv-cli --features termux
+CARGO_NDK_PLATFORM=24 cargo ndk -t arm64-v8a build --release --locked --bin ktv-cli --features termux
 ```
 
 The `termux` feature enables the interactive CLI on Android. Android JNI library

@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: personal-cli-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   windows:
     if: github.repository == 'NSH1RO/ktv-casting'
@@ -53,7 +57,9 @@ jobs:
       - name: Build Android ARM64 CLI
         env:
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
-        run: cargo ndk -t arm64-v8a -p 24 build --release --locked --bin ktv-cli --features termux
+          ANDROID_NDK_ROOT: ${{ steps.ndk.outputs.ndk-path }}
+          CARGO_NDK_PLATFORM: "24"
+        run: cargo ndk -t arm64-v8a build --release --locked --bin ktv-cli --features termux
       - name: Verify and package executable
         run: |
           file target/aarch64-linux-android/release/ktv-cli
