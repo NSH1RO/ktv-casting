@@ -1,4 +1,4 @@
-#[cfg(not(target_os = "android"))]
+#[cfg(any(not(target_os = "android"), feature = "termux"))]
 mod cli {
     use anyhow::{Context, Result, bail};
     use crossterm::event::{self};
@@ -36,6 +36,8 @@ mod cli {
     }
 
     pub async fn run() -> Result<()> {
+        #[cfg(all(target_os = "android", feature = "termux"))]
+        ktv_casting_lib::media_session::init_cache_dir(".")?;
         let pb = setup_env();
 
         // 1. 选择投屏模式
@@ -61,6 +63,26 @@ mod cli {
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
         } else {
             // --- DLNA 模式 ---
+            println!("运行模式：");
+            println!("  1. 正常投屏");
+            println!("  2. 设备只读调试（不执行投屏、暂停或音量操作）");
+            print!("请选择 [1/2，默认1]：");
+            io::Write::flush(&mut io::stdout())?;
+            let mut debug_mode = String::new();
+            io::stdin().read_line(&mut debug_mode)?;
+            if debug_mode.trim() == "2" {
+                let controller = DlnaController::new();
+                let device = select_dlna_device_interactively(&controller).await?;
+                let saved = controller.save_device_debug_info(&device).await?;
+                println!("设备：{}", device.friendly_name);
+                println!("描述文件和服务约束文件已保存到：{}", saved.display());
+                println!("设备服务及接口能力：");
+                for service in &device.device.services() {
+                    println!("  {} ({})", service.service_type(), service.service_id());
+                }
+                println!("只读调试完成；未启动投屏引擎或发送任何控制操作。");
+                return Ok(());
+            }
             let media_url_mode = select_media_url_mode_interactively()?;
             let controller = DlnaController::new();
             let device = select_dlna_device_interactively(&controller).await?;
@@ -398,11 +420,11 @@ mod cli {
     }
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(any(not(target_os = "android"), feature = "termux"))]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     cli::run().await
 }
 
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", not(feature = "termux")))]
 fn main() {}

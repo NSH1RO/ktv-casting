@@ -415,6 +415,11 @@ fn extract_control_endpoint_from_debug(service_debug: &str) -> Option<String> {
 // AVTransport服务URN
 const AV_TRANSPORT: URN = URN::service("schemas-upnp-org", "AVTransport", 1);
 
+fn safe_debug_name(name: &str) -> String {
+    let safe: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
+    if safe.is_empty() { "device".to_owned() } else { safe }
+}
+
 // DLNA设备信息
 #[derive(Debug, Clone)]
 pub struct DlnaDevice {
@@ -430,6 +435,48 @@ pub struct DlnaController;
 impl DlnaController {
     pub fn new() -> Self {
         Self
+    }
+
+    /// 保存 UPnP 描述文件及每个服务的 SCPD 能力文件；仅发起 HTTP GET。
+    pub async fn save_device_debug_info(&self, device: &DlnaDevice) -> anyhow::Result<std::path::PathBuf> {
+        let root = std::path::PathBuf::from("dlna-debug")
+            .join(safe_debug_name(&device.friendly_name));
+        tokio::fs::create_dir_all(&root).await?;
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(5))
+            .build()?;
+        let description_url = device.location.parse::<url::Url>()?;
+        let description = client.get(description_url.clone()).send().await?.error_for_status()?.bytes().await?;
+        tokio::fs::write(root.join("description.xml"), &description).await?;
+        let document = roxmltree::Document::parse(std::str::from_utf8(&description)?)?;
+        let mut report = String::new();
+        report.push_str(&format!("设备: {}\n位置: {}\n\n服务:\n", device.friendly_name, device.location));
+        let mut service_index = 0usize;
+        for service in document.descendants().filter(|n| n.has_tag_name("service")) {
+            let child = |tag| service.children().find(|n| n.has_tag_name(tag)).and_then(|n| n.text());
+            let (Some(service_type), Some(service_id), Some(scpd)) = (child("serviceType"), child("serviceId"), child("SCPDURL")) else { continue };
+            report.push_str(&format!("- {} ({})\n", service_type, service_id));
+            let scpd_url = description_url.join(scpd)?;
+            let response = client.get(scpd_url.clone()).send().await?;
+            if !response.status().is_success() {
+                report.push_str(&format!("  SCPD 获取失败: HTTP {} ({})\n", response.status(), scpd_url));
+                continue;
+            }
+            let body = response.bytes().await?;
+            let filename = format!("service-{}.xml", service_index);
+            service_index += 1;
+            tokio::fs::write(root.join(filename), &body).await?;
+            if let Ok(xml) = roxmltree::Document::parse(std::str::from_utf8(&body)?) {
+                for action in xml.descendants().filter(|n| n.has_tag_name("action")) {
+                    if let Some(name) = action.children().find(|n| n.has_tag_name("name")).and_then(|n| n.text()) {
+                        report.push_str(&format!("  接口: {}\n", name));
+                    }
+                }
+            }
+        }
+        tokio::fs::write(root.join("capabilities.txt"), report).await?;
+        Ok(root)
     }
 
     // 发现网络中的DLNA渲染器设备

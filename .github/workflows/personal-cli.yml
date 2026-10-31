@@ -1,0 +1,70 @@
+name: Personal Windows and Termux CLI
+
+on:
+  push:
+    branches: ["personal/cli-builds"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    if: github.repository == 'NSH1RO/ktv-casting'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked --bin ktv-cli
+      - name: Verify CLI starts
+        shell: pwsh
+        run: |
+          $output = '' | & .\target\release\ktv-cli.exe 2>&1 | Out-String
+          if ($output -notmatch 'KTV') { throw "CLI startup failed: $output" }
+          $global:LASTEXITCODE = 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ktv-cli-windows-x64
+          path: target/release/ktv-cli.exe
+          if-no-files-found: error
+          retention-days: 30
+
+  termux:
+    if: github.repository == 'NSH1RO/ktv-casting'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: termux-arm64
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r27d
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev
+          cargo install cargo-ndk --locked
+      - name: Build Android ARM64 CLI
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+        run: cargo ndk -t arm64-v8a -p 24 build --release --locked --bin ktv-cli --features termux
+      - name: Verify and package executable
+        run: |
+          file target/aarch64-linux-android/release/ktv-cli
+          readelf -h target/aarch64-linux-android/release/ktv-cli | grep -q AArch64
+          mkdir -p dist
+          cp target/aarch64-linux-android/release/ktv-cli dist/
+          cp docs/termux-cli.md dist/README.md
+          tar -C dist -czf ktv-cli-termux-arm64.tar.gz ktv-cli README.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ktv-cli-termux-arm64
+          path: ktv-cli-termux-arm64.tar.gz
+          if-no-files-found: error
+          retention-days: 30

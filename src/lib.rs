@@ -28,7 +28,7 @@ const _: () = assert!(API_TIMEOUT.as_secs() < ANR_DEADLINE.as_secs(),
 /// 媒体代理上游连接超时。此路径不在 block_on 链路上，可设得更宽松。
 pub const PROXY_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
-#[cfg(target_os = "android")]
+#[cfg(all(target_os = "android", not(feature = "termux")))]
 pub mod android;
 
 pub mod bilibili_parser;
