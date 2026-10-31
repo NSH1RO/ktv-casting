@@ -77,7 +77,7 @@ mod cli {
                 println!("设备：{}", device.friendly_name);
                 println!("描述文件和服务约束文件已保存到：{}", saved.display());
                 println!("设备服务及接口能力：");
-                for service in &device.device.services() {
+                for service in device.device.services() {
                     println!("  {} ({})", service.service_type(), service.service_id());
                 }
                 println!("只读调试完成；未启动投屏引擎或发送任何控制操作。");
